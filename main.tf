@@ -2,14 +2,13 @@ provider "aws" {
   region = "eu-west-2"
 }
 
-resource "aws_s3_bucket" "my_bucket" {
-  bucket = "http-bucket-task"
+resource "aws_key_pair" "my_key" {
+  key_name   = "my-ec2-key"
+  public_key = file("C:/Users/Kajal/.ssh/id_rsa.pub")
 }
 
-resource "aws_security_group" "http_access" {
-  vpc_id      = "vpc-0f9cd5cef10531b66"
-  name = "http-https-access"
-  description = "Allow HTTP and HTTPS traffic"
+resource "aws_security_group" "sg" {
+  name_prefix = "http-service-sg"
 
   ingress {
     from_port   = 80
@@ -19,8 +18,8 @@ resource "aws_security_group" "http_access" {
   }
 
   ingress {
-    from_port   = 443
-    to_port     = 443
+    from_port   = 22
+    to_port     = 22
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
@@ -33,58 +32,30 @@ resource "aws_security_group" "http_access" {
   }
 }
 
-resource "aws_lb" "http_service_lb" {
-  name               = "http-service-lb"
-  internal           = false
-  load_balancer_type = "application"
-  security_groups    = [aws_security_group.http_access.id]
-  subnets            = ["subnet-0a51bf48a50e26bc8", "subnet-0682f706051fc0a65"]
+resource "aws_instance" "flask_instance" {
+  ami           = "ami-019374baf467d6601"
+  instance_type = "t2.micro"
+  key_name      = aws_key_pair.my_key.key_name
+  security_groups = [aws_security_group.sg.name]
+
+  user_data = <<-EOF
+              #!/bin/bash
+              sudo apt-get update
+              sudo apt-get install -y python3-pip python3-dev
+              pip3 install flask boto3
+              cd /home/ubuntu
+              echo 'from flask import Flask, jsonify, abort' > app.py
+              echo 'import boto3' >> app.py
+              echo 'app = Flask(__name__)' >> app.py
+              echo "s3 = boto3.client('s3')" >> app.py
+              echo "BUCKET_NAME = 'http-bucket-task'" >> app.py
+              echo "if __name__ == '__main__':" >> app.py
+              echo "    app.run(debug=True, host='0.0.0.0', port=8000)" >> app.py
+              python3 app.py &
+              EOF
 }
 
-resource "aws_lb_target_group" "http_service_tg" {
-  name     = "http-service-tg"
-  port     = 5000
-  protocol = "HTTP"
-  vpc_id   = "vpc-0f9cd5cef10531b66"
+output "ec2_public_ip" {
+  value = aws_instance.flask_instance.public_ip
 }
-
-resource "aws_lb_listener" "https_listener" {
-  load_balancer_arn = aws_lb.http_service_lb.arn
-  port              = 443
-  protocol          = "HTTPS"
-  ssl_policy        = "ELBSecurityPolicy-2016-08"
-  certificate_arn   = "arn:aws:acm:eu-west-2:975050266364:certificate/931dc2e2-aa2f-44f6-8ab1-6f7f956cecf7"
-
-  default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.http_service_tg.arn
-  }
-}
-
-resource "aws_lb_listener" "http_redirect" {
-  load_balancer_arn = aws_lb.http_service_lb.arn
-  port              = 80
-  protocol          = "HTTP"
-
-  default_action {
-    type = "redirect"
-
-    redirect {
-      protocol   = "HTTPS"
-      port       = "443"
-      status_code = "HTTP_301"
-    }
-  }
-}
-
-resource "aws_route53_record" "api_alias" {
-  zone_id = "Z096980623E5FIEHE257C"
-  name    = "api.list-bucket.com"
-  type    = "CNAME"
-  ttl     = 300
-  records = [aws_lb.http_service_lb.dns_name]
-}
-
-output "alb_dns_name" {
-  value = aws_lb.http_service_lb.dns_name
-}
+ 
